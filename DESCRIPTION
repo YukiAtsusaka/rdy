@@ -1,12 +1,18 @@
 Package: rdy
-Title: What the Package Does (One Line, Title Case)
+Title: Ready-to-use utilities for ranking data analysis 
 Version: 0.0.0.9000
 Authors@R: 
-    person("First", "Last", , "first.last@example.com", role = c("aut", "cre"),
-           comment = c(ORCID = "YOUR-ORCID-ID"))
-Description: What the package does (one paragraph).
-License: `use_mit_license()`, `use_gpl3_license()` or friends to pick a
-    license
+    person("Yuki", "Atsusaka", , "yuki.atsusaka@gmail.com", role = c("aut", "cre"),
+           comment = c(ORCID="0000-0001-5365-1876"))
+Description: This package offers practical tools for ranking data analysis.
+License: GPL (>= 3)
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.3.2
+Imports:
+    dplyr,
+    rlang,
+    utils,
+    stats
+Suggests:
+    tibble
