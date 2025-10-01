@@ -47,28 +47,32 @@
 #' )
 #' res <- diff_in_means(dt, items = c("A","B","C"), treat = "treated", weights = "w")
 #' }
+
+#' Estimate ranking effects: weighted, unit-normalized [-1,1], and standardized
+#'
+#' (Same description as before; truncated for brevity)
+#' @importFrom rlang .data
 #' @export
 diff_in_means <- function(data,
-                       items,
-                       treat,
-                       weights = NULL,
-                       se_type = "HC2",
-                       clusters = NULL,
-                       na_action = c("drop", "none"),
-                       top_k_max = NULL,
-                       return_models = FALSE,
-                       ...) {
-  # --- namespaces ---
+                          items,
+                          treat,
+                          weights = NULL,
+                          se_type = "HC2",
+                          clusters = NULL,
+                          na_action = c("drop", "none"),
+                          top_k_max = NULL,
+                          return_models = FALSE,
+                          ...) {
   requireNamespace("estimatr", quietly = TRUE)
   requireNamespace("broom",    quietly = TRUE)
   requireNamespace("dplyr",    quietly = TRUE)
   requireNamespace("purrr",    quietly = TRUE)
   requireNamespace("rlang",    quietly = TRUE)
   requireNamespace("tibble",   quietly = TRUE)
+  requireNamespace("tidyr",    quietly = TRUE)
 
   na_action <- match.arg(na_action)
 
-  # --- checks ---
   stopifnot(is.data.frame(data))
   if (!is.character(items) || length(items) < 2L)
     stop("`items` must be a character vector with at least two ranking columns.")
@@ -79,7 +83,7 @@ diff_in_means <- function(data,
   if (!is.null(clusters) && !clusters %in% names(data))
     stop("`clusters` not found in `data`.")
 
-  # --- weights: vector or column ---
+  # weights: vector or column
   w <- NULL
   if (!is.null(weights)) {
     if (is.character(weights) && length(weights) == 1L) {
@@ -89,21 +93,18 @@ diff_in_means <- function(data,
       if (length(weights) != nrow(data))
         stop("If `weights` is numeric, it must have length nrow(data).")
       w <- weights
-    } else {
-      stop("`weights` must be NULL, a single column name, or a numeric vector.")
-    }
+    } else stop("`weights` must be NULL, a single column name, or a numeric vector.")
   }
 
   used_cols <- unique(c(items, treat, clusters, if (is.character(weights)) weights))
   df <- data[, used_cols, drop = FALSE]
-
   if (na_action == "drop") {
     keep <- stats::complete.cases(df)
     df <- df[keep, , drop = FALSE]
     if (!is.null(w)) w <- w[keep]
   }
 
-  # --- treatment to {0,1} ---
+  # treatment to {0,1}
   D <- df[[treat]]
   if (is.logical(D)) D <- as.integer(D)
   if (is.factor(D))  D <- as.integer(D) - 1L
@@ -119,297 +120,208 @@ diff_in_means <- function(data,
     w_ctrl_sum  <- sum(w[D == 0], na.rm = TRUE)
     w_sum       <- sum(w, na.rm = TRUE)
   } else {
-    w_treat_sum <- n_treat
-    w_ctrl_sum  <- n_ctrl
-    w_sum       <- n
+    w_treat_sum <- n_treat; w_ctrl_sum <- n_ctrl; w_sum <- n
   }
 
   J <- length(items)
   if (is.null(top_k_max)) top_k_max <- J - 1L
   top_k_max <- max(1L, min(as.integer(top_k_max), J - 1L))
 
-  # --- helpers ---
+  # helpers
   w_or_ones <- function(x) if (is.null(x)) rep(1, nrow(df)) else x
-
   wmean <- function(y, ww) {
-    ww <- w_or_ones(ww)
-    sum(ww * y, na.rm = TRUE) / sum(ww, na.rm = TRUE)
+    ww <- w_or_ones(ww); sum(ww * y, na.rm = TRUE) / sum(ww, na.rm = TRUE)
   }
   wsd_pop <- function(y, ww) {
-    ww <- w_or_ones(ww)
-    mu <- wmean(y, ww)
+    ww <- w_or_ones(ww); mu <- wmean(y, ww)
     v  <- sum(ww * (y - mu)^2, na.rm = TRUE) / sum(ww, na.rm = TRUE)
     sqrt(pmax(v, 0))
   }
-
-  # run weighted diff-in-means via lm_robust on vector y
   run_dim <- function(y) {
-    fit <- estimatr::lm_robust(
-      y ~ D,
-      data    = df,
-      weights = w,
-      se_type = se_type,
-      clusters = if (!is.null(clusters)) df[[clusters]] else NULL,
-      ...
-    )
+    fit <- estimatr::lm_robust(y ~ D, data = df, weights = w, se_type = se_type,
+                               clusters = if (!is.null(clusters)) df[[clusters]] else NULL, ...)
     broom::tidy(fit, conf.int = TRUE)
   }
-
-  # linear transform of tidy (x -> a + b x), ordering CI properly for b<0
   lin_xform <- function(tb, a, b) {
-    lo <- a + b * tb$conf.low
-    hi <- a + b * tb$conf.high
+    lo <- a + b * tb$conf.low; hi <- a + b * tb$conf.high
     tb$estimate  <- a + b * tb$estimate
     tb$std.error <- abs(b) * tb$std.error
-    tb$conf.low  <- pmin(lo, hi)
-    tb$conf.high <- pmax(lo, hi)
+    tb$conf.low  <- pmin(lo, hi); tb$conf.high <- pmax(lo, hi)
     tb
   }
 
-  # assemble a block given a target
+  # per-target block
   by_target <- function(target_item) {
     other_items <- setdiff(items, target_item)
     rank_t     <- df[[target_item]]
+    ctrl_mask  <- (D == 0)
 
-    # ---- Average rank block ----
-    # Raw Δ_rank in [-(J-1), (J-1)]
+    # Average rank: raw Δ_rank
     avg_raw <- run_dim(rank_t) |>
       dplyr::filter(.data$term == "D") |>
-      dplyr::mutate(
-        outcome     = paste0("Avg: ", target_item),
-        effect_type = "average rank",
-        item        = target_item,
-        J           = J
-      )
+      dplyr::mutate(outcome = paste0("Avg: ", target_item),
+                    effect_type = "average rank",
+                    item = target_item, J = J)
 
-    # Unit-normalized ([-1,1]): Δ_unit = -Δ_rank/(J-1)
-    b_avg <- -1 / (J - 1)
+    # unit scale Δ_unit = -Δ_rank/(J-1)
+    b_avg   <- -1/(J-1)
     avg_unit <- lin_xform(dplyr::rename(avg_raw,
-                                        estimate_raw  = estimate,
-                                        std.error_raw = std.error,
-                                        conf.low_raw  = conf.low,
-                                        conf.high_raw = conf.high),
+                                        estimate_raw  = .data$estimate,
+                                        std.error_raw = .data$std.error,
+                                        conf.low_raw  = .data$conf.low,
+                                        conf.high_raw = .data$conf.high),
                           a = 0, b = b_avg)
 
-    # control SD on the same unit scale: sd(rank|D=0)/(J-1)
-    ctrl_mask <- (D == 0)
     sd_ctrl_avg_unit <- wsd_pop(rank_t[ctrl_mask], if (is.null(w)) NULL else w[ctrl_mask]) / (J - 1)
-    if (is.na(sd_ctrl_avg_unit) || sd_ctrl_avg_unit <= .Machine$double.eps) {
-      avg_unit <- avg_unit |>
-        dplyr::mutate(
-          estimate_std  = NA_real_,
-          std.error_std = NA_real_,
-          conf.low_std  = NA_real_,
-          conf.high_std = NA_real_,
-          sd_control_unit = sd_ctrl_avg_unit
-        )
+    avg_unit <- if (is.na(sd_ctrl_avg_unit) || sd_ctrl_avg_unit <= .Machine$double.eps) {
+      avg_unit |>
+        dplyr::mutate(estimate_std = NA_real_, std.error_std = NA_real_,
+                      conf.low_std = NA_real_, conf.high_std = NA_real_,
+                      sd_control_unit = sd_ctrl_avg_unit)
     } else {
-      avg_unit <- avg_unit |>
-        dplyr::mutate(
-          estimate_std  = estimate / sd_ctrl_avg_unit,
-          std.error_std = std.error / sd_ctrl_avg_unit,
-          conf.low_std  = conf.low / sd_ctrl_avg_unit,
-          conf.high_std = conf.high / sd_ctrl_avg_unit,
-          sd_control_unit = sd_ctrl_avg_unit
-        )
+      avg_unit |>
+        dplyr::mutate(estimate_std  = .data$estimate / sd_ctrl_avg_unit,
+                      std.error_std = .data$std.error / sd_ctrl_avg_unit,
+                      conf.low_std  = .data$conf.low / sd_ctrl_avg_unit,
+                      conf.high_std = .data$conf.high / sd_ctrl_avg_unit,
+                      sd_control_unit = sd_ctrl_avg_unit)
     }
 
-    # keep tidy columns
     res_avg <- avg_unit |>
-      dplyr::select(
-        estimate_raw, std.error_raw, conf.low_raw, conf.high_raw,
-        estimate, std.error, conf.low, conf.high,
-        estimate_std, std.error_std, conf.low_std, conf.high_std,
-        sd_control_unit, p.value,
-        outcome, effect_type, item, J
-      ) |>
-      dplyr::rename(
-        estimate_unit  = estimate,
-        std.error_unit = std.error,
-        conf.low_unit  = conf.low,
-        conf.high_unit = conf.high
-      )
+      dplyr::select(estimate_raw, std.error_raw, conf.low_raw, conf.high_raw,
+                    estimate, std.error, conf.low, conf.high,
+                    estimate_std, std.error_std, conf.low_std, conf.high_std,
+                    sd_control_unit, p.value, outcome, effect_type, item, J) |>
+      dplyr::rename(estimate_unit = .data$estimate,
+                    std.error_unit = .data$std.error,
+                    conf.low_unit = .data$conf.low,
+                    conf.high_unit = .data$conf.high)
 
-    # ---- Pairwise wins (binary) ----
-    pair_list <- purrr::imap(other_items, function(oi, j) {
+    # Pairwise
+    res_pair <- purrr::imap_dfr(other_items, function(oi, j) {
       y <- as.integer(rank_t < df[[oi]])
       tb <- run_dim(y) |>
         dplyr::filter(.data$term == "D") |>
-        dplyr::mutate(
-          outcome     = paste0("v. ", oi),
-          effect_type = "pairwise ranking",
-          item        = target_item,
-          J           = J
-        )
-      # raw Δ in [-1,1]; unit = raw (b=1)
-      tb2 <- dplyr::rename(tb,
-                           estimate_raw  = estimate,
-                           std.error_raw = std.error,
-                           conf.low_raw  = conf.low,
-                           conf.high_raw = conf.high)
-      tb2 <- lin_xform(tb2, a = 0, b = 1)
+        dplyr::mutate(outcome = paste0("v. ", oi),
+                      effect_type = "pairwise ranking",
+                      item = target_item, J = J) |>
+        dplyr::rename(estimate_raw  = .data$estimate,
+                      std.error_raw = .data$std.error,
+                      conf.low_raw  = .data$conf.low,
+                      conf.high_raw = .data$conf.high) |>
+        lin_xform(a = 0, b = 1)
 
-      y0  <- y[ctrl_mask]
-      sd0 <- wsd_pop(y0, if (is.null(w)) NULL else w[ctrl_mask])
+      sd0 <- wsd_pop(y[ctrl_mask], if (is.null(w)) NULL else w[ctrl_mask])
       if (is.na(sd0) || sd0 <= .Machine$double.eps) {
-        tb2 <- tb2 |>
-          dplyr::mutate(
-            estimate_std  = NA_real_,
-            std.error_std = NA_real_,
-            conf.low_std  = NA_real_,
-            conf.high_std = NA_real_,
-            sd_control_unit = sd0
-          )
+        tb <- tb |>
+          dplyr::mutate(estimate_std = NA_real_, std.error_std = NA_real_,
+                        conf.low_std = NA_real_, conf.high_std = NA_real_,
+                        sd_control_unit = sd0)
       } else {
-        tb2 <- tb2 |>
-          dplyr::mutate(
-            estimate_std  = estimate / sd0,
-            std.error_std = std.error / sd0,
-            conf.low_std  = conf.low / sd0,
-            conf.high_std = conf.high / sd0,
-            sd_control_unit = sd0
-          )
+        tb <- tb |>
+          dplyr::mutate(estimate_std  = .data$estimate / sd0,
+                        std.error_std = .data$std.error / sd0,
+                        conf.low_std  = .data$conf.low / sd0,
+                        conf.high_std = .data$conf.high / sd0,
+                        sd_control_unit = sd0)
       }
 
-      tb2 |>
-        dplyr::select(
-          estimate_raw, std.error_raw, conf.low_raw, conf.high_raw,
-          estimate, std.error, conf.low, conf.high,
-          estimate_std, std.error_std, conf.low_std, conf.high_std,
-          sd_control_unit, p.value,
-          outcome, effect_type, item, J
-        ) |>
-        dplyr::rename(
-          estimate_unit  = estimate,
-          std.error_unit = std.error,
-          conf.low_unit  = conf.low,
-          conf.high_unit = conf.high
-        )
+      tb |>
+        dplyr::select(estimate_raw, std.error_raw, conf.low_raw, conf.high_raw,
+                      estimate, std.error, conf.low, conf.high,
+                      estimate_std, std.error_std, conf.low_std, conf.high_std,
+                      sd_control_unit, p.value, outcome, effect_type, item, J) |>
+        dplyr::rename(estimate_unit = .data$estimate,
+                      std.error_unit = .data$std.error,
+                      conf.low_unit = .data$conf.low,
+                      conf.high_unit = .data$conf.high)
     })
-    res_pair <- dplyr::bind_rows(pair_list)
 
-    # ---- Top-k (binary) ----
-    top_list <- purrr::imap(seq_len(top_k_max), function(k, j) {
+    # Top-k
+    res_top <- purrr::imap_dfr(seq_len(top_k_max), function(k, j) {
       y <- as.integer(rank_t <= k)
       tb <- run_dim(y) |>
         dplyr::filter(.data$term == "D") |>
-        dplyr::mutate(
-          outcome     = paste0("Top-", k),
-          effect_type = "top-k ranking",
-          item        = target_item,
-          J           = J
-        )
-      tb2 <- dplyr::rename(tb,
-                           estimate_raw  = estimate,
-                           std.error_raw = std.error,
-                           conf.low_raw  = conf.low,
-                           conf.high_raw = conf.high)
-      tb2 <- lin_xform(tb2, a = 0, b = 1)
+        dplyr::mutate(outcome = paste0("Top-", k),
+                      effect_type = "top-k ranking",
+                      item = target_item, J = J) |>
+        dplyr::rename(estimate_raw  = .data$estimate,
+                      std.error_raw = .data$std.error,
+                      conf.low_raw  = .data$conf.low,
+                      conf.high_raw = .data$conf.high) |>
+        lin_xform(a = 0, b = 1)
 
-      y0  <- y[ctrl_mask]
-      sd0 <- wsd_pop(y0, if (is.null(w)) NULL else w[ctrl_mask])
+      sd0 <- wsd_pop(y[ctrl_mask], if (is.null(w)) NULL else w[ctrl_mask])
       if (is.na(sd0) || sd0 <= .Machine$double.eps) {
-        tb2 <- tb2 |>
-          dplyr::mutate(
-            estimate_std  = NA_real_,
-            std.error_std = NA_real_,
-            conf.low_std  = NA_real_,
-            conf.high_std = NA_real_,
-            sd_control_unit = sd0
-          )
+        tb <- tb |>
+          dplyr::mutate(estimate_std = NA_real_, std.error_std = NA_real_,
+                        conf.low_std = NA_real_, conf.high_std = NA_real_,
+                        sd_control_unit = sd0)
       } else {
-        tb2 <- tb2 |>
-          dplyr::mutate(
-            estimate_std  = estimate / sd0,
-            std.error_std = std.error / sd0,
-            conf.low_std  = conf.low / sd0,
-            conf.high_std = conf.high / sd0,
-            sd_control_unit = sd0
-          )
+        tb <- tb |>
+          dplyr::mutate(estimate_std  = .data$estimate / sd0,
+                        std.error_std = .data$std.error / sd0,
+                        conf.low_std  = .data$conf.low / sd0,
+                        conf.high_std = .data$conf.high / sd0,
+                        sd_control_unit = sd0)
       }
 
-      tb2 |>
-        dplyr::select(
-          estimate_raw, std.error_raw, conf.low_raw, conf.high_raw,
-          estimate, std.error, conf.low, conf.high,
-          estimate_std, std.error_std, conf.low_std, conf.high_std,
-          sd_control_unit, p.value,
-          outcome, effect_type, item, J
-        ) |>
-        dplyr::rename(
-          estimate_unit  = estimate,
-          std.error_unit = std.error,
-          conf.low_unit  = conf.low,
-          conf.high_unit = conf.high
-        )
+      tb |>
+        dplyr::select(estimate_raw, std.error_raw, conf.low_raw, conf.high_raw,
+                      estimate, std.error, conf.low, conf.high,
+                      estimate_std, std.error_std, conf.low_std, conf.high_std,
+                      sd_control_unit, p.value, outcome, effect_type, item, J) |>
+        dplyr::rename(estimate_unit = .data$estimate,
+                      std.error_unit = .data$std.error,
+                      conf.low_unit = .data$conf.low,
+                      conf.high_unit = .data$conf.high)
     })
-    res_top <- dplyr::bind_rows(top_list)
 
-    # ---- Marginal rank (binary) ----
-    marg_list <- purrr::imap(seq_len(J), function(r, j) {
+    # Marginal
+    res_marg <- purrr::imap_dfr(seq_len(J), function(r, j) {
       y <- as.integer(rank_t == r)
       tb <- run_dim(y) |>
         dplyr::filter(.data$term == "D") |>
-        dplyr::mutate(
-          outcome     = paste0("Ranked ", r),
-          effect_type = "marginal ranking",
-          item        = target_item,
-          J           = J
-        )
-      tb2 <- dplyr::rename(tb,
-                           estimate_raw  = estimate,
-                           std.error_raw = std.error,
-                           conf.low_raw  = conf.low,
-                           conf.high_raw = conf.high)
-      tb2 <- lin_xform(tb2, a = 0, b = 1)
+        dplyr::mutate(outcome = paste0("Ranked ", r),
+                      effect_type = "marginal ranking",
+                      item = target_item, J = J) |>
+        dplyr::rename(estimate_raw  = .data$estimate,
+                      std.error_raw = .data$std.error,
+                      conf.low_raw  = .data$conf.low,
+                      conf.high_raw = .data$conf.high) |>
+        lin_xform(a = 0, b = 1)
 
-      y0  <- y[ctrl_mask]
-      sd0 <- wsd_pop(y0, if (is.null(w)) NULL else w[ctrl_mask])
+      sd0 <- wsd_pop(y[ctrl_mask], if (is.null(w)) NULL else w[ctrl_mask])
       if (is.na(sd0) || sd0 <= .Machine$double.eps) {
-        tb2 <- tb2 |>
-          dplyr::mutate(
-            estimate_std  = NA_real_,
-            std.error_std = NA_real_,
-            conf.low_std  = NA_real_,
-            conf.high_std = NA_real_,
-            sd_control_unit = sd0
-          )
+        tb <- tb |>
+          dplyr::mutate(estimate_std = NA_real_, std.error_std = NA_real_,
+                        conf.low_std = NA_real_, conf.high_std = NA_real_,
+                        sd_control_unit = sd0)
       } else {
-        tb2 <- tb2 |>
-          dplyr::mutate(
-            estimate_std  = estimate / sd0,
-            std.error_std = std.error / sd0,
-            conf.low_std  = conf.low / sd0,
-            conf.high_std = conf.high / sd0,
-            sd_control_unit = sd0
-          )
+        tb <- tb |>
+          dplyr::mutate(estimate_std  = .data$estimate / sd0,
+                        std.error_std = .data$std.error / sd0,
+                        conf.low_std  = .data$conf.low / sd0,
+                        conf.high_std = .data$conf.high / sd0,
+                        sd_control_unit = sd0)
       }
 
-      tb2 |>
-        dplyr::select(
-          estimate_raw, std.error_raw, conf.low_raw, conf.high_raw,
-          estimate, std.error, conf.low, conf.high,
-          estimate_std, std.error_std, conf.low_std, conf.high_std,
-          sd_control_unit, p.value,
-          outcome, effect_type, item, J
-        ) |>
-        dplyr::rename(
-          estimate_unit  = estimate,
-          std.error_unit = std.error,
-          conf.low_unit  = conf.low,
-          conf.high_unit = conf.high
-        )
+      tb |>
+        dplyr::select(estimate_raw, std.error_raw, conf.low_raw, conf.high_raw,
+                      estimate, std.error, conf.low, conf.high,
+                      estimate_std, std.error_std, conf.low_std, conf.high_std,
+                      sd_control_unit, p.value, outcome, effect_type, item, J) |>
+        dplyr::rename(estimate_unit = .data$estimate,
+                      std.error_unit = .data$std.error,
+                      conf.low_unit = .data$conf.low,
+                      conf.high_unit = .data$conf.high)
     })
-    res_marg <- dplyr::bind_rows(marg_list)
 
     dplyr::bind_rows(res_avg, res_pair, res_top, res_marg)
   }
 
-  # run for all targets
-  results <- purrr::map_dfr(items, by_target)
-
-  # add global diagnostics
-  results <- results |>
+  # compute for all targets (wide across scales)
+  results_wide <- purrr::map_dfr(items, by_target) |>
     dplyr::mutate(
       n             = n,
       n_treat       = n_treat,
@@ -417,11 +329,25 @@ diff_in_means <- function(data,
       w_sum         = w_sum,
       w_treat_sum   = w_treat_sum,
       w_control_sum = w_ctrl_sum
-    ) |>
+    )
+
+  # ---- reshape to long across scales ----
+  results <- tidyr::pivot_longer(
+    results_wide,
+    cols = c(
+      estimate_raw, estimate_unit, estimate_std,
+      std.error_raw, std.error_unit, std.error_std,
+      conf.low_raw, conf.low_unit, conf.low_std,
+      conf.high_raw, conf.high_unit, conf.high_std
+    ),
+    names_to  = c(".value", "scale"),
+    names_pattern = "(estimate|std\\.error|conf\\.low|conf\\.high)_(raw|unit|std)"
+  ) |>
+    # keep sd_control_unit (applies to 'std' scale; others may be NA)
+    dplyr::arrange(.data$item, .data$effect_type, .data$outcome, .data$scale) |>
     tibble::as_tibble()
 
   if (!return_models) return(results)
 
-  # placeholder to keep API parity
   list(results = results, models = NULL)
 }
