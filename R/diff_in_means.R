@@ -11,7 +11,7 @@
 #' For each effect, returns:
 #'   - Raw ATE (\code{*_raw})
 #'   - \strong{Unit-normalized} ATE in [-1,1] (\code{*_unit})
-#'   - \strong{Standardized} ATE dividing \code{*_unit} by the control SD on the same scale (\code{*_std})
+#'   - \strong{Standardized} ATE dividing \code{_unit} by the control SD on the same scale (\code{*_std})
 #'
 #' @param data A data.frame/tibble containing \code{items}, \code{treat}, and optionally \code{weights}.
 #' @param items Character vector of ranking columns (1 = top/best). Length \(\ge 2\).
@@ -47,10 +47,6 @@
 #' )
 #' res <- diff_in_means(dt, items = c("A","B","C"), treat = "treated", weights = "w")
 #' }
-
-#' Estimate ranking effects: weighted, unit-normalized [-1,1], and standardized
-#'
-#' (Same description as before; truncated for brevity)
 #' @importFrom rlang .data
 #' @export
 diff_in_means <- function(data,

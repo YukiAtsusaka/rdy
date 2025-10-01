@@ -66,7 +66,7 @@ For each effect, returns:
 \itemize{
 \item Raw ATE (\code{*_raw})
 \item \strong{Unit-normalized} ATE in \link{-1,1} (\code{*_unit})
-\item \strong{Standardized} ATE dividing \code{*_unit} by the control SD on the same scale (\code{*_std})
+\item \strong{Standardized} ATE dividing \code{_unit} by the control SD on the same scale (\code{*_std})
 }
 }
 \examples{

@@ -3,6 +3,7 @@
 S3method(print,rank_gap)
 export(diff_in_means)
 export(est_rank_gap)
+export(viz_diff)
 importFrom(dplyr,"%>%")
 importFrom(dplyr,across)
 importFrom(dplyr,all_of)
