@@ -2,8 +2,8 @@
 
 S3method(print,rank_gap)
 export(diff_in_means)
-export(est_rank_gap)
 export(ordinal_seq)
+export(rank_dist)
 export(rpluce)
 export(viz_diff)
 importFrom(dplyr,"%>%")

@@ -77,12 +77,12 @@ dist_fun_for <- function(method = c("kendall","footrule","rho")) {
 #'   data.frame(group="T", Tmat, check.names = FALSE),
 #'   data.frame(group="C", Cmat, check.names = FALSE)
 #' )
-#' res <- est_rank_gap(df, group_col="group", rank_cols=items,
+#' res <- rank_dist(df, group_col="group", rank_cols=items,
 #'                     method="kendall", se="bootstrap", B=200, seed=42)
 #' print(res)
 
 #' @export
-est_rank_gap <- function(df, group_col, rank_cols,
+rank_dist <- function(df, group_col, rank_cols,
                          method = c("kendall","footrule","rho"),
                          se = c("bootstrap","analytic"),
                          B = 1000, seed = NULL) {
@@ -166,7 +166,7 @@ print.rank_gap <- function(x, ...) {
 
 # ---------- 4) Optional consensus variant (export or not as you wish) ----------
 #' @noRd
-est_rank_gap_consensus <- function(df, group_col, rank_cols,
+rank_dist_consensus <- function(df, group_col, rank_cols,
                                    method = c("footrule","rho"),
                                    B = 1000, seed = NULL) {
   method <- match.arg(method)
