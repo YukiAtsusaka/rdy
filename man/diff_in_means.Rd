@@ -70,15 +70,6 @@ For each effect, returns:
 }
 }
 \examples{
-\dontrun{
 set.seed(1)
-dt <- data.frame(
-  treated = rbinom(300, 1, 0.5),
-  A = sample(1:4, 300, TRUE),
-  B = sample(1:4, 300, TRUE),
-  C = sample(1:4, 300, TRUE),
-  w = runif(300, 0.5, 1.5)
-)
-res <- diff_in_means(dt, items = c("A","B","C"), treat = "treated", weights = "w")
-}
+n <- 300
 }
