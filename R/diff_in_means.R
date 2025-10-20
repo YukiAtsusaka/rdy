@@ -141,11 +141,18 @@ diff_in_means <- function(data,
     )
   }
 
+  to_rank_num <- function(x) {
+    if (is.numeric(x)) return(as.numeric(x))
+    if (is.factor(x))  return(suppressWarnings(as.numeric(as.character(x))))
+    if (is.character(x)) return(suppressWarnings(as.numeric(x)))
+    stop("Rank columns must be numeric, factor, or character coercible to numeric.")
+  }
+
   out_list <- list()
 
   for (target_item in items) {
     other_items <- setdiff(items, target_item)
-    rank_t <- df[[target_item]]
+    rank_t <- to_rank_num(df[[target_item]])
 
     # ---------- Average rank ----------
     fit_avg <- fit_dim(rank_t)
@@ -158,8 +165,8 @@ diff_in_means <- function(data,
     avg_unit_lo  <- pmin(b_avg * tb_avg$conf.low,  b_avg * tb_avg$conf.high)
     avg_unit_hi  <- pmax(b_avg * tb_avg$conf.low,  b_avg * tb_avg$conf.high)
 
-    y_avg_unit <- (J - rank_t) / (J - 1)  # unit-scale version [0,1]
-    mask_avg   <- ctrl_mask & !is.na(y_avg_unit)
+    y_avg_unit <- (J - rank_t) / (J - 1)  # now definitely numeric in [0,1]
+    mask_avg   <- (D == 0) & !is.na(y_avg_unit)
 
     sd_ctrl_avg_unit <- if (is.null(w)) {
       if (!any(mask_avg)) NA_real_ else {
