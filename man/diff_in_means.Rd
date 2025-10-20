@@ -2,61 +2,61 @@
 % Please edit documentation in R/diff_in_means.R
 \name{diff_in_means}
 \alias{diff_in_means}
-\title{Estimate ranking effects: weighted, unit-normalized \link{-1,1}, and standardized}
+\title{Estimate ranking effects (unweighted): raw, unit, and standardized (raw/sd0)}
 \usage{
 diff_in_means(
   data,
   items,
   treat,
-  weights = NULL,
   se_type = "HC2",
   clusters = NULL,
   na_action = c("drop", "none"),
   top_k_max = NULL,
-  return_models = FALSE,
   ...
 )
 }
 \arguments{
-\item{data}{A data.frame/tibble containing \code{items}, \code{treat}, and optionally \code{weights}.}
+\item{data}{A data.frame/tibble with \code{items} and \code{treat}.}
 
-\item{items}{Character vector of ranking columns (1 = top/best). Length \(\ge 2\).}
+\item{items}{Character vector of ranking columns (1 = top/best). Length >= 2.}
 
-\item{treat}{String; binary treatment column (0/1, logical, or factor that can be mapped to 0/1).}
+\item{treat}{String; binary treatment column (0/1, logical, or factor codable to 0/1).}
 
-\item{weights}{NULL, a numeric vector of length \code{nrow(data)}, or a single string naming a weight column.}
+\item{se_type}{SE type for estimatr::lm_robust (default "HC2").}
 
-\item{se_type}{SE type passed to \code{estimatr::lm_robust} (default "HC2").}
+\item{clusters}{Optional string for clustering variable name in \code{data}.}
 
-\item{clusters}{Optional string naming a clustering variable in \code{data} (forwarded to \code{lm_robust}).}
+\item{na_action}{"drop" (default) or "none". If "drop", listwise on used cols.}
 
-\item{na_action}{"drop" (default) to listwise drop on used columns, or "none".}
+\item{top_k_max}{Optional integer (default J-1).}
 
-\item{top_k_max}{Optional integer; cap for top-k block (default \code{length(items)-1}).}
-
-\item{return_models}{Logical; if TRUE, also returns (placeholder) model list. Default FALSE.}
-
-\item{...}{Extra args passed to \code{estimatr::lm_robust}.}
+\item{...}{Extra args passed to estimatr::lm_robust.}
 }
 \value{
-Tibble with rows for all effects across all items.
+Tibble with one row per (item × effect). Columns:
+estimate_\emph{, std.error_}, conf.low_\emph{, conf.high_} for scales raw/unit/std,
+sd_control_raw, sd_control_unit, p.value, outcome, effect_type, item, J, n, n_treat, n_control.
 }
 \description{
-For each item in \code{items}, constructs:
+For each item in \code{items}, constructs four outcome families:
 \enumerate{
-\item Average rank of the target (1 = best), reversed and scaled to unit range:
-\eqn{\Delta_{\text{unit}} = -\Delta_{\text{rank}}/(J-1) \in [-1,1]}.
-\item Pairwise wins vs. others (binary).
-\item Top-k indicators for the target (k = 1..J-1) (binary).
-\item Marginal rank indicators for the target (r = 1..J) (binary).
+\item Average rank of the target (1 = best):
+\itemize{
+\item raw outcome: R in {1,...,J} (lower is better)
+\item unit outcome: U = (J - R)/(J - 1) in \link{0,1} (higher is better)
+\item std outcome: raw effect divided by SD(R | control)
+}
+\item Pairwise wins vs. others (binary): Y = 1{R_target < R_other}
+\item Top-k (binary): Y = 1{R_target <= k}
+\item Marginal (binary): Y = 1{R_target == r}
 }
 }
 \details{
-Estimation is difference-in-means via \code{estimatr::lm_robust} (optionally weighted).
-For each effect, returns:
+Estimation is unweighted difference-in-means via estimatr::lm_robust(y ~ D).
+For each effect we report:
 \itemize{
-\item Raw ATE (\code{*_raw})
-\item \strong{Unit-normalized} ATE in \link{-1,1} (\code{*_unit})
-\item \strong{Standardized} ATE dividing \code{_unit} by the control SD on the same scale (\code{*_std})
+\item Raw ATE (for average-rank only; binaries have NA in raw block by design)
+\item Unit ATE (for all; binaries' unit == raw)
+\item Standardized ATE: (raw effect) / sd0_raw, where sd0_raw = SD of raw outcome among controls
 }
 }

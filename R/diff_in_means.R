@@ -1,46 +1,47 @@
-#' Estimate ranking effects: weighted, unit-normalized [-1,1], and standardized
+#' Estimate ranking effects (unweighted): raw, unit, and standardized (raw/sd0)
 #'
-#' For each item in \code{items}, constructs:
-#' 1) Average rank of the target (1 = best), reversed and scaled to unit range:
-#'    \eqn{\Delta_{\text{unit}} = -\Delta_{\text{rank}}/(J-1) \in [-1,1]}.
-#' 2) Pairwise wins vs. others (binary).
-#' 3) Top-k indicators for the target (k = 1..J-1) (binary).
-#' 4) Marginal rank indicators for the target (r = 1..J) (binary).
+#' For each item in `items`, constructs four outcome families:
+#' 1) Average rank of the target (1 = best):
+#'    - raw outcome: R in {1,...,J} (lower is better)
+#'    - unit outcome: U = (J - R)/(J - 1) in [0,1] (higher is better)
+#'    - std outcome: raw effect divided by SD(R | control)
+#' 2) Pairwise wins vs. others (binary): Y = 1{R_target < R_other}
+#' 3) Top-k (binary): Y = 1{R_target <= k}
+#' 4) Marginal (binary): Y = 1{R_target == r}
 #'
-#' Estimation is difference-in-means via \code{estimatr::lm_robust} (optionally weighted).
-#' For each effect, returns:
-#'   - Raw ATE (\code{*_raw})
-#'   - \strong{Unit-normalized} ATE in [-1,1] (\code{*_unit})
-#'   - \strong{Standardized} ATE dividing \code{_unit} by the control SD on the same scale (\code{*_std})
+#' Estimation is unweighted difference-in-means via estimatr::lm_robust(y ~ D).
+#' For each effect we report:
+#'   - Raw ATE (for average-rank only; binaries have NA in raw block by design)
+#'   - Unit ATE (for all; binaries' unit == raw)
+#'   - Standardized ATE: (raw effect) / sd0_raw, where sd0_raw = SD of raw outcome among controls
 #'
-#' @param data A data.frame/tibble containing \code{items}, \code{treat}, and optionally \code{weights}.
-#' @param items Character vector of ranking columns (1 = top/best). Length \(\ge 2\).
-#' @param treat String; binary treatment column (0/1, logical, or factor that can be mapped to 0/1).
-#' @param weights NULL, a numeric vector of length \code{nrow(data)}, or a single string naming a weight column.
-#' @param se_type SE type passed to \code{estimatr::lm_robust} (default "HC2").
-#' @param clusters Optional string naming a clustering variable in \code{data} (forwarded to \code{lm_robust}).
-#' @param na_action "drop" (default) to listwise drop on used columns, or "none".
-#' @param top_k_max Optional integer; cap for top-k block (default \code{length(items)-1}).
-#' @param return_models Logical; if TRUE, also returns (placeholder) model list. Default FALSE.
-#' @param ... Extra args passed to \code{estimatr::lm_robust}.
+#' @param data A data.frame/tibble with `items` and `treat`.
+#' @param items Character vector of ranking columns (1 = top/best). Length >= 2.
+#' @param treat String; binary treatment column (0/1, logical, or factor codable to 0/1).
+#' @param se_type SE type for estimatr::lm_robust (default "HC2").
+#' @param clusters Optional string for clustering variable name in `data`.
+#' @param na_action "drop" (default) or "none". If "drop", listwise on used cols.
+#' @param top_k_max Optional integer (default J-1).
+#' @param ... Extra args passed to estimatr::lm_robust.
 #'
-#' @return Tibble with rows for all effects across all items.
+#' @return Tibble with one row per (item × effect). Columns:
+#'   estimate_*, std.error_*, conf.low_*, conf.high_* for scales raw/unit/std,
+#'   sd_control_raw, sd_control_unit, p.value, outcome, effect_type, item, J, n, n_treat, n_control.
+#'
 #' @importFrom rlang .data
 #' @export
 diff_in_means <- function(data,
                           items,
                           treat,
-                          weights = NULL,
                           se_type = "HC2",
                           clusters = NULL,
                           na_action = c("drop", "none"),
                           top_k_max = NULL,
-                          return_models = FALSE,
                           ...) {
+
   requireNamespace("estimatr", quietly = TRUE)
   requireNamespace("broom",    quietly = TRUE)
   requireNamespace("dplyr",    quietly = TRUE)
-  requireNamespace("purrr",    quietly = TRUE)
   requireNamespace("tibble",   quietly = TRUE)
   requireNamespace("tidyr",    quietly = TRUE)
 
@@ -56,28 +57,14 @@ diff_in_means <- function(data,
   if (!is.null(clusters) && !clusters %in% names(data))
     stop("`clusters` not found in `data`.")
 
-  # Weights
-  w <- NULL
-  if (!is.null(weights)) {
-    if (is.character(weights) && length(weights) == 1L) {
-      if (!weights %in% names(data)) stop("`weights` column not found in `data`.")
-      w <- data[[weights]]
-    } else if (is.numeric(weights)) {
-      if (length(weights) != nrow(data))
-        stop("If `weights` is numeric, it must have length nrow(data).")
-      w <- weights
-    } else stop("`weights` must be NULL, a single column name, or a numeric vector.")
-  }
-
-  used_cols <- unique(c(items, treat, clusters, if (is.character(weights)) weights))
+  used_cols <- unique(c(items, treat, clusters))
   df <- data[, used_cols, drop = FALSE]
   if (na_action == "drop") {
     keep <- stats::complete.cases(df)
     df <- df[keep, , drop = FALSE]
-    if (!is.null(w)) w <- w[keep]
   }
 
-  # Treatment coding
+  # Treatment coding to {0,1}
   D <- df[[treat]]
   if (is.logical(D)) D <- as.integer(D)
   if (is.factor(D))  D <- as.integer(D) - 1L
@@ -86,280 +73,249 @@ diff_in_means <- function(data,
 
   # Diagnostics
   n       <- nrow(df)
-  n_treat <- sum(D == 1, na.rm = TRUE)
-  n_ctrl  <- sum(D == 0, na.rm = TRUE)
-
-  if (is.null(w)) {
-    w_vec <- rep(1, n)
-    w_treat_sum <- n_treat
-    w_ctrl_sum  <- n_ctrl
-    w_sum       <- n
-  } else {
-    w_vec <- w
-    w_treat_sum <- sum(w_vec[D == 1], na.rm = TRUE)
-    w_ctrl_sum  <- sum(w_vec[D == 0], na.rm = TRUE)
-    w_sum       <- sum(w_vec, na.rm = TRUE)
-  }
-
-  # Settings
-  J <- length(items)
-  if (is.null(top_k_max)) top_k_max <- J - 1L
-  top_k_max <- max(1L, min(as.integer(top_k_max), J - 1L))
+  n_treat <- sum(D == 1)
+  n_ctrl  <- sum(D == 0)
   ctrl_mask <- (D == 0)
 
-  # Utilities
-  wmean_masked <- function(y, ww, mask) {
-    if (!any(mask, na.rm = TRUE)) return(NA_real_)
-    num <- sum(ww[mask] * y[mask], na.rm = TRUE)
-    den <- sum(ww[mask],           na.rm = TRUE)
-    if (!is.finite(den) || den <= 0) return(NA_real_)
-    num / den
-  }
-
-  wsd_masked_fsc <- function(y, ww, mask) {
-    idx <- which(mask & !is.na(y) & !is.na(ww))
-    if (length(idx) == 0) return(NA_real_)
-    w  <- ww[idx]
-    y2 <- y[idx]
-    sw <- sum(w)
-    if (!is.finite(sw) || sw <= 0) return(NA_real_)
-    w  <- w / sw
-    mu <- sum(w * y2)
-    denom <- 1 - sum(w^2)
-    if (denom <= .Machine$double.eps) return(NA_real_)
-    v <- sum(w * (y2 - mu)^2) / denom
-    sqrt(pmax(v, 0))
-  }
-
+  # DIM helper
   fit_dim <- function(y) {
     estimatr::lm_robust(
-      y ~ D, data = df,
-      weights  = if (!is.null(weights)) w_vec else NULL,
+      y ~ D,
+      data     = df,
       se_type  = se_type,
       clusters = if (!is.null(clusters)) df[[clusters]] else NULL,
       ...
     )
   }
 
+  # Safe coercion to numeric R in {1,...,J}
   to_rank_num <- function(x) {
-    if (is.numeric(x)) return(as.numeric(x))
-    if (is.factor(x))  return(suppressWarnings(as.numeric(as.character(x))))
+    if (is.numeric(x))   return(as.numeric(x))
+    if (is.factor(x))    return(suppressWarnings(as.numeric(as.character(x))))
     if (is.character(x)) return(suppressWarnings(as.numeric(x)))
     stop("Rank columns must be numeric, factor, or character coercible to numeric.")
   }
+
+  # Unweighted SD among controls
+  sd_control <- function(y, mask_ctrl) {
+    y0 <- y[mask_ctrl & !is.na(y)]
+    if (length(y0) <= 1) return(NA_real_)
+    stats::sd(y0)
+  }
+
+  J <- length(items)
+  if (is.null(top_k_max)) top_k_max <- J - 1L
+  top_k_max <- max(1L, min(as.integer(top_k_max), J - 1L))
 
   out_list <- list()
 
   for (target_item in items) {
     other_items <- setdiff(items, target_item)
-    rank_t <- to_rank_num(df[[target_item]])
 
-    # ---------- Average rank ----------
-    fit_avg <- fit_dim(rank_t)
-    tb_avg  <- broom::tidy(fit_avg, conf.int = TRUE) |>
+    # ----------------------------
+    # 1) Average-rank outcomes
+    # ----------------------------
+    R <- to_rank_num(df[[target_item]])         # raw ranks {1,...,J}
+    U <- (J - R) / (J - 1)                      # unit in [0,1]
+
+    # raw effect (R)
+    fit_avg_raw <- fit_dim(R)
+    tb_avg_raw  <- broom::tidy(fit_avg_raw, conf.int = TRUE) |>
       dplyr::filter(.data$term == "D")
 
-    b_avg <- -1 / (J - 1)
-    avg_unit_est <- b_avg * tb_avg$estimate
-    avg_unit_se  <- abs(b_avg) * tb_avg$std.error
-    avg_unit_lo  <- pmin(b_avg * tb_avg$conf.low,  b_avg * tb_avg$conf.high)
-    avg_unit_hi  <- pmax(b_avg * tb_avg$conf.low,  b_avg * tb_avg$conf.high)
+    # unit effect (U)
+    fit_avg_unit <- fit_dim(U)
+    tb_avg_unit  <- broom::tidy(fit_avg_unit, conf.int = TRUE) |>
+      dplyr::filter(.data$term == "D")
 
-    y_avg_unit <- (J - rank_t) / (J - 1)  # now definitely numeric in [0,1]
-    mask_avg   <- (D == 0) & !is.na(y_avg_unit)
+    # control SDs (raw & unit)
+    sd0_avg_raw  <- sd_control(R, ctrl_mask)
+    sd0_avg_unit <- sd_control(U, ctrl_mask)
 
-    sd_ctrl_avg_unit <- if (is.null(w)) {
-      if (!any(mask_avg)) NA_real_ else {
-        y0 <- y_avg_unit[mask_avg]
-        n0 <- length(y0)
-        if (n0 <= 1) NA_real_ else stats::sd(y0)
-      }
-    } else {
-      wsd_masked_fsc(y_avg_unit, w_vec, mask_avg)
-    }
-
-    if (is.na(sd_ctrl_avg_unit) || sd_ctrl_avg_unit <= .Machine$double.eps) {
+    # standardized: **raw effect divided by sd0_raw**
+    if (is.na(sd0_avg_raw) || sd0_avg_raw <= .Machine$double.eps) {
       est_std_avg <- se_std_avg <- lo_std_avg <- hi_std_avg <- NA_real_
     } else {
-      est_std_avg <- avg_unit_est / sd_ctrl_avg_unit
-      se_std_avg  <- avg_unit_se  / sd_ctrl_avg_unit
-      lo_std_avg  <- avg_unit_lo  / sd_ctrl_avg_unit
-      hi_std_avg  <- avg_unit_hi  / sd_ctrl_avg_unit
+      est_std_avg <- tb_avg_raw$estimate / sd0_avg_raw
+      se_std_avg  <- tb_avg_raw$std.error / sd0_avg_raw
+      lo_std_avg  <- tb_avg_raw$conf.low / sd0_avg_raw
+      hi_std_avg  <- tb_avg_raw$conf.high / sd0_avg_raw
     }
 
     out_list[[length(out_list) + 1L]] <- tibble::tibble(
-      estimate_raw   = tb_avg$estimate,
-      std.error_raw  = tb_avg$std.error,
-      conf.low_raw   = tb_avg$conf.low,
-      conf.high_raw  = tb_avg$conf.high,
-      estimate_unit  = avg_unit_est,
-      std.error_unit = avg_unit_se,
-      conf.low_unit  = avg_unit_lo,
-      conf.high_unit = avg_unit_hi,
-      estimate_std   = est_std_avg,
-      std.error_std  = se_std_avg,
-      conf.low_std   = lo_std_avg,
-      conf.high_std  = hi_std_avg,
-      sd_control_unit = sd_ctrl_avg_unit,
-      p.value        = tb_avg$p.value,
-      outcome        = paste0("Avg: ", target_item),
-      effect_type    = "average rank",
-      item           = target_item,
-      J              = J
+      estimate_raw    = tb_avg_raw$estimate,
+      std.error_raw   = tb_avg_raw$std.error,
+      conf.low_raw    = tb_avg_raw$conf.low,
+      conf.high_raw   = tb_avg_raw$conf.high,
+      estimate_unit   = tb_avg_unit$estimate,
+      std.error_unit  = tb_avg_unit$std.error,
+      conf.low_unit   = tb_avg_unit$conf.low,
+      conf.high_unit  = tb_avg_unit$conf.high,
+      estimate_std    = est_std_avg,
+      std.error_std   = se_std_avg,
+      conf.low_std    = lo_std_avg,
+      conf.high_std   = hi_std_avg,
+      sd_control_raw  = sd0_avg_raw,
+      sd_control_unit = sd0_avg_unit,
+      p.value         = tb_avg_unit$p.value, # (p-value for unit-scale effect; raw p-value can be added if needed)
+      outcome         = paste0("Avg: ", target_item),
+      effect_type     = "average rank",
+      item            = target_item,
+      J               = J,
+      n               = n,
+      n_treat         = n_treat,
+      n_control       = n_ctrl
     )
 
-    # ---------- Pairwise ----------
+    # ----------------------------
+    # 2) Pairwise (binary) outcomes
+    # ----------------------------
     for (oi in other_items) {
-      y_pair <- as.integer(rank_t < df[[oi]])
-      fit_pw <- fit_dim(y_pair)
+      R_oi <- to_rank_num(df[[oi]])
+      Y_pw <- as.integer(R < R_oi)   # raw = unit for binary
+
+      fit_pw <- fit_dim(Y_pw)
       tb_pw  <- broom::tidy(fit_pw, conf.int = TRUE) |>
         dplyr::filter(.data$term == "D")
 
-      est_unit <- tb_pw$estimate
-      se_unit  <- tb_pw$std.error
-      lo_unit  <- tb_pw$conf.low
-      hi_unit  <- tb_pw$conf.high
+      sd0_pw_raw  <- sd_control(Y_pw, ctrl_mask)
+      sd0_pw_unit <- sd0_pw_raw
 
-      mask_pw <- ctrl_mask & !is.na(y_pair)
-      p0 <- wmean_masked(y_pair, w_vec, mask_pw)
-      sd0 <- if (is.na(p0)) NA_real_ else sqrt(pmax(p0 * (1 - p0), 0))
-
-      if (is.na(sd0) || sd0 <= .Machine$double.eps) {
+      if (is.na(sd0_pw_raw) || sd0_pw_raw <= .Machine$double.eps) {
         est_std <- se_std <- lo_std <- hi_std <- NA_real_
       } else {
-        est_std <- est_unit / sd0
-        se_std  <- se_unit  / sd0
-        lo_std  <- lo_unit  / sd0
-        hi_std  <- hi_unit  / sd0
+        est_std <- tb_pw$estimate / sd0_pw_raw
+        se_std  <- tb_pw$std.error / sd0_pw_raw
+        lo_std  <- tb_pw$conf.low / sd0_pw_raw
+        hi_std  <- tb_pw$conf.high / sd0_pw_raw
       }
 
       out_list[[length(out_list) + 1L]] <- tibble::tibble(
-        estimate_raw   = tb_pw$estimate,
-        std.error_raw  = tb_pw$std.error,
-        conf.low_raw   = tb_pw$conf.low,
-        conf.high_raw  = tb_pw$conf.high,
-        estimate_unit  = est_unit,
-        std.error_unit = se_unit,
-        conf.low_unit  = lo_unit,
-        conf.high_unit = hi_unit,
-        estimate_std   = est_std,
-        std.error_std  = se_std,
-        conf.low_std   = lo_std,
-        conf.high_std  = hi_std,
-        sd_control_unit = sd0,
-        p.value        = tb_pw$p.value,
-        outcome        = paste0("v. ", oi),
-        effect_type    = "pairwise ranking",
-        item           = target_item,
-        J              = J
+        estimate_raw    = NA_real_,  # no separate raw model for binary; raw==unit
+        std.error_raw   = NA_real_,
+        conf.low_raw    = NA_real_,
+        conf.high_raw   = NA_real_,
+        estimate_unit   = tb_pw$estimate,
+        std.error_unit  = tb_pw$std.error,
+        conf.low_unit   = tb_pw$conf.low,
+        conf.high_unit  = tb_pw$conf.high,
+        estimate_std    = est_std,
+        std.error_std   = se_std,
+        conf.low_std    = lo_std,
+        conf.high_std   = hi_std,
+        sd_control_raw  = sd0_pw_raw,
+        sd_control_unit = sd0_pw_unit,
+        p.value         = tb_pw$p.value,
+        outcome         = paste0("v. ", oi),
+        effect_type     = "pairwise ranking",
+        item            = target_item,
+        J               = J,
+        n               = n,
+        n_treat         = n_treat,
+        n_control       = n_ctrl
       )
     }
 
-    # ---------- Top-k ----------
+    # ----------------------------
+    # 3) Top-k (binary) outcomes
+    # ----------------------------
     for (k in seq_len(top_k_max)) {
-      y_topk <- as.integer(rank_t <= k)
-      fit_tk <- fit_dim(y_topk)
+      Y_tk <- as.integer(R <= k)
+
+      fit_tk <- fit_dim(Y_tk)
       tb_tk  <- broom::tidy(fit_tk, conf.int = TRUE) |>
         dplyr::filter(.data$term == "D")
 
-      est_unit <- tb_tk$estimate
-      se_unit  <- tb_tk$std.error
-      lo_unit  <- tb_tk$conf.low
-      hi_unit  <- tb_tk$conf.high
+      sd0_tk_raw  <- sd_control(Y_tk, ctrl_mask)
+      sd0_tk_unit <- sd0_tk_raw
 
-      mask_tk <- ctrl_mask & !is.na(y_topk)
-      p0 <- wmean_masked(y_topk, w_vec, mask_tk)
-      sd0 <- if (is.na(p0)) NA_real_ else sqrt(pmax(p0 * (1 - p0), 0))
-
-      if (is.na(sd0) || sd0 <= .Machine$double.eps) {
+      if (is.na(sd0_tk_raw) || sd0_tk_raw <= .Machine$double.eps) {
         est_std <- se_std <- lo_std <- hi_std <- NA_real_
       } else {
-        est_std <- est_unit / sd0
-        se_std  <- se_unit  / sd0
-        lo_std  <- lo_unit  / sd0
-        hi_std  <- hi_unit  / sd0
+        est_std <- tb_tk$estimate / sd0_tk_raw
+        se_std  <- tb_tk$std.error / sd0_tk_raw
+        lo_std  <- tb_tk$conf.low / sd0_tk_raw
+        hi_std  <- tb_tk$conf.high / sd0_tk_raw
       }
 
       out_list[[length(out_list) + 1L]] <- tibble::tibble(
-        estimate_raw   = tb_tk$estimate,
-        std.error_raw  = tb_tk$std.error,
-        conf.low_raw   = tb_tk$conf.low,
-        conf.high_raw  = tb_tk$conf.high,
-        estimate_unit  = est_unit,
-        std.error_unit = se_unit,
-        conf.low_unit  = lo_unit,
-        conf.high_unit = hi_unit,
-        estimate_std   = est_std,
-        std.error_std  = se_std,
-        conf.low_std   = lo_std,
-        conf.high_std  = hi_std,
-        sd_control_unit = sd0,
-        p.value        = tb_tk$p.value,
-        outcome        = paste0("Top-", k),
-        effect_type    = "top-k ranking",
-        item           = target_item,
-        J              = J
+        estimate_raw    = NA_real_,
+        std.error_raw   = NA_real_,
+        conf.low_raw    = NA_real_,
+        conf.high_raw   = NA_real_,
+        estimate_unit   = tb_tk$estimate,
+        std.error_unit  = tb_tk$std.error,
+        conf.low_unit   = tb_tk$conf.low,
+        conf.high_unit  = tb_tk$conf.high,
+        estimate_std    = est_std,
+        std.error_std   = se_std,
+        conf.low_std    = lo_std,
+        conf.high_std   = hi_std,
+        sd_control_raw  = sd0_tk_raw,
+        sd_control_unit = sd0_tk_unit,
+        p.value         = tb_tk$p.value,
+        outcome         = paste0("Top-", k),
+        effect_type     = "top-k ranking",
+        item            = target_item,
+        J               = J,
+        n               = n,
+        n_treat         = n_treat,
+        n_control       = n_ctrl
       )
     }
 
-    # ---------- Marginal ----------
+    # ----------------------------
+    # 4) Marginal (binary) outcomes
+    # ----------------------------
     for (r in seq_len(J)) {
-      y_marg <- as.integer(rank_t == r)
-      fit_mg <- fit_dim(y_marg)
+      Y_mg <- as.integer(R == r)
+
+      fit_mg <- fit_dim(Y_mg)
       tb_mg  <- broom::tidy(fit_mg, conf.int = TRUE) |>
         dplyr::filter(.data$term == "D")
 
-      est_unit <- tb_mg$estimate
-      se_unit  <- tb_mg$std.error
-      lo_unit  <- tb_mg$conf.low
-      hi_unit  <- tb_mg$conf.high
+      sd0_mg_raw  <- sd_control(Y_mg, ctrl_mask)
+      sd0_mg_unit <- sd0_mg_raw
 
-      mask_mg <- ctrl_mask & !is.na(y_marg)
-      p0 <- wmean_masked(y_marg, w_vec, mask_mg)
-      sd0 <- if (is.na(p0)) NA_real_ else sqrt(pmax(p0 * (1 - p0), 0))
-
-      if (is.na(sd0) || sd0 <= .Machine$double.eps) {
+      if (is.na(sd0_mg_raw) || sd0_mg_raw <= .Machine$double.eps) {
         est_std <- se_std <- lo_std <- hi_std <- NA_real_
       } else {
-        est_std <- est_unit / sd0
-        se_std  <- se_unit  / sd0
-        lo_std  <- lo_unit  / sd0
-        hi_std  <- hi_unit  / sd0
+        est_std <- tb_mg$estimate / sd0_mg_raw
+        se_std  <- tb_mg$std.error / sd0_mg_raw
+        lo_std  <- tb_mg$conf.low / sd0_mg_raw
+        hi_std  <- tb_mg$conf.high / sd0_mg_raw
       }
 
       out_list[[length(out_list) + 1L]] <- tibble::tibble(
-        estimate_raw   = tb_mg$estimate,
-        std.error_raw  = tb_mg$std.error,
-        conf.low_raw   = tb_mg$conf.low,
-        conf.high_raw  = tb_mg$conf.high,
-        estimate_unit  = est_unit,
-        std.error_unit = se_unit,
-        conf.low_unit  = lo_unit,
-        conf.high_unit = hi_unit,
-        estimate_std   = est_std,
-        std.error_std  = se_std,
-        conf.low_std   = lo_std,
-        conf.high_std  = hi_std,
-        sd_control_unit = sd0,
-        p.value        = tb_mg$p.value,
-        outcome        = paste0("Ranked ", r),
-        effect_type    = "marginal ranking",
-        item           = target_item,
-        J              = J
+        estimate_raw    = NA_real_,
+        std.error_raw   = NA_real_,
+        conf.low_raw    = NA_real_,
+        conf.high_raw   = NA_real_,
+        estimate_unit   = tb_mg$estimate,
+        std.error_unit  = tb_mg$std.error,
+        conf.low_unit   = tb_mg$conf.low,
+        conf.high_unit  = tb_mg$conf.high,
+        estimate_std    = est_std,
+        std.error_std   = se_std,
+        conf.low_std    = lo_std,
+        conf.high_std   = hi_std,
+        sd_control_raw  = sd0_mg_raw,
+        sd_control_unit = sd0_mg_unit,
+        p.value         = tb_mg$p.value,
+        outcome         = paste0("Ranked ", r),
+        effect_type     = "marginal ranking",
+        item            = target_item,
+        J               = J,
+        n               = n,
+        n_treat         = n_treat,
+        n_control       = n_ctrl
       )
     }
   }
 
-  results_wide <- dplyr::bind_rows(out_list) |>
-    dplyr::mutate(
-      n             = n,
-      n_treat       = n_treat,
-      n_control     = n_ctrl,
-      w_sum         = w_sum,
-      w_treat_sum   = w_treat_sum,
-      w_control_sum = w_ctrl_sum
-    )
+  results_wide <- dplyr::bind_rows(out_list)
 
+  # Long format (raw/unit/std blocks)
   results <- tidyr::pivot_longer(
     results_wide,
     cols = c(
@@ -374,6 +330,5 @@ diff_in_means <- function(data,
     dplyr::arrange(.data$item, .data$effect_type, .data$outcome, .data$scale) |>
     tibble::as_tibble()
 
-  if (!return_models) return(results)
-  list(results = results, models = NULL)
+  results
 }
