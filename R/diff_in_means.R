@@ -24,20 +24,7 @@
 #' @param return_models Logical; if TRUE, also returns (placeholder) model list. Default FALSE.
 #' @param ... Extra args passed to \code{estimatr::lm_robust}.
 #'
-#' @return Tibble with rows for all effects across all items. Columns include:
-#' \itemize{
-#'  \item \code{estimate_raw, std.error_raw, conf.low_raw, conf.high_raw}
-#'  \item \code{estimate_unit, std.error_unit, conf.low_unit, conf.high_unit}  (in [-1,1])
-#'  \item \code{estimate_std, std.error_std, conf.low_std, conf.high_std}      (standardized by control SD)
-#'  \item \code{sd_control_unit} (the control-group SD on the unit scale used to standardize)
-#'  \item \code{p.value}, \code{outcome}, \code{effect_type}, \code{item}, \code{J}
-#'  \item diagnostics: \code{n, n_treat, n_control, w_sum, w_treat_sum, w_control_sum}
-#' }
-#' If \code{return_models=TRUE}, returns a list with \code{results} and a placeholder \code{models}.
-#'
-#' @examples
-#' set.seed(1)
-#' n <- 300
+#' @return Tibble with rows for all effects across all items.
 #' @importFrom rlang .data
 #' @export
 diff_in_means <- function(data,
@@ -58,8 +45,8 @@ diff_in_means <- function(data,
   requireNamespace("tidyr",    quietly = TRUE)
 
   na_action <- match.arg(na_action)
-
   stopifnot(is.data.frame(data))
+
   if (!is.character(items) || length(items) < 2L)
     stop("`items` must be a character vector with at least two ranking columns.")
   if (!is.character(treat) || length(treat) != 1L)
@@ -118,10 +105,9 @@ diff_in_means <- function(data,
   J <- length(items)
   if (is.null(top_k_max)) top_k_max <- J - 1L
   top_k_max <- max(1L, min(as.integer(top_k_max), J - 1L))
-
   ctrl_mask <- (D == 0)
 
-  # Small inline utilities (explicit masks!)
+  # Utilities
   wmean_masked <- function(y, ww, mask) {
     if (!any(mask, na.rm = TRUE)) return(NA_real_)
     num <- sum(ww[mask] * y[mask], na.rm = TRUE)
@@ -129,13 +115,22 @@ diff_in_means <- function(data,
     if (!is.finite(den) || den <= 0) return(NA_real_)
     num / den
   }
-  wsd_masked <- function(y, ww, mask) {
-    if (!any(mask, na.rm = TRUE)) return(NA_real_)
-    mu <- wmean_masked(y, ww, mask)
-    if (is.na(mu)) return(NA_real_)
-    v  <- sum(ww[mask] * (y[mask] - mu)^2, na.rm = TRUE) / sum(ww[mask], na.rm = TRUE)
+
+  wsd_masked_fsc <- function(y, ww, mask) {
+    idx <- which(mask & !is.na(y) & !is.na(ww))
+    if (length(idx) == 0) return(NA_real_)
+    w  <- ww[idx]
+    y2 <- y[idx]
+    sw <- sum(w)
+    if (!is.finite(sw) || sw <= 0) return(NA_real_)
+    w  <- w / sw
+    mu <- sum(w * y2)
+    denom <- 1 - sum(w^2)
+    if (denom <= .Machine$double.eps) return(NA_real_)
+    v <- sum(w * (y2 - mu)^2) / denom
     sqrt(pmax(v, 0))
   }
+
   fit_dim <- function(y) {
     estimatr::lm_robust(
       y ~ D, data = df,
@@ -150,21 +145,31 @@ diff_in_means <- function(data,
 
   for (target_item in items) {
     other_items <- setdiff(items, target_item)
-    rank_t     <- df[[target_item]]
+    rank_t <- df[[target_item]]
 
-    # ---------- Average rank (non-binary) ----------
+    # ---------- Average rank ----------
     fit_avg <- fit_dim(rank_t)
     tb_avg  <- broom::tidy(fit_avg, conf.int = TRUE) |>
       dplyr::filter(.data$term == "D")
 
-    b_avg <- -1/(J - 1)
+    b_avg <- -1 / (J - 1)
     avg_unit_est <- b_avg * tb_avg$estimate
     avg_unit_se  <- abs(b_avg) * tb_avg$std.error
     avg_unit_lo  <- pmin(b_avg * tb_avg$conf.low,  b_avg * tb_avg$conf.high)
     avg_unit_hi  <- pmax(b_avg * tb_avg$conf.low,  b_avg * tb_avg$conf.high)
 
-    mask_avg <- ctrl_mask & !is.na(rank_t)
-    sd_ctrl_avg_unit <- wsd_masked(rank_t, w_vec, mask_avg) / (J - 1)
+    y_avg_unit <- (J - rank_t) / (J - 1)  # unit-scale version [0,1]
+    mask_avg   <- ctrl_mask & !is.na(y_avg_unit)
+
+    sd_ctrl_avg_unit <- if (is.null(w)) {
+      if (!any(mask_avg)) NA_real_ else {
+        y0 <- y_avg_unit[mask_avg]
+        n0 <- length(y0)
+        if (n0 <= 1) NA_real_ else stats::sd(y0)
+      }
+    } else {
+      wsd_masked_fsc(y_avg_unit, w_vec, mask_avg)
+    }
 
     if (is.na(sd_ctrl_avg_unit) || sd_ctrl_avg_unit <= .Machine$double.eps) {
       est_std_avg <- se_std_avg <- lo_std_avg <- hi_std_avg <- NA_real_
@@ -196,7 +201,7 @@ diff_in_means <- function(data,
       J              = J
     )
 
-    # ---------- Pairwise (binary) ----------
+    # ---------- Pairwise ----------
     for (oi in other_items) {
       y_pair <- as.integer(rank_t < df[[oi]])
       fit_pw <- fit_dim(y_pair)
@@ -243,7 +248,7 @@ diff_in_means <- function(data,
       )
     }
 
-    # ---------- Top-k (binary) ----------
+    # ---------- Top-k ----------
     for (k in seq_len(top_k_max)) {
       y_topk <- as.integer(rank_t <= k)
       fit_tk <- fit_dim(y_topk)
@@ -290,7 +295,7 @@ diff_in_means <- function(data,
       )
     }
 
-    # ---------- Marginal (binary) ----------
+    # ---------- Marginal ----------
     for (r in seq_len(J)) {
       y_marg <- as.integer(rank_t == r)
       fit_mg <- fit_dim(y_marg)

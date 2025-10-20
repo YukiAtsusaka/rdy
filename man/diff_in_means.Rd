@@ -39,16 +39,7 @@ diff_in_means(
 \item{...}{Extra args passed to \code{estimatr::lm_robust}.}
 }
 \value{
-Tibble with rows for all effects across all items. Columns include:
-\itemize{
-\item \code{estimate_raw, std.error_raw, conf.low_raw, conf.high_raw}
-\item \code{estimate_unit, std.error_unit, conf.low_unit, conf.high_unit}  (in \link{-1,1})
-\item \code{estimate_std, std.error_std, conf.low_std, conf.high_std}      (standardized by control SD)
-\item \code{sd_control_unit} (the control-group SD on the unit scale used to standardize)
-\item \code{p.value}, \code{outcome}, \code{effect_type}, \code{item}, \code{J}
-\item diagnostics: \code{n, n_treat, n_control, w_sum, w_treat_sum, w_control_sum}
-}
-If \code{return_models=TRUE}, returns a list with \code{results} and a placeholder \code{models}.
+Tibble with rows for all effects across all items.
 }
 \description{
 For each item in \code{items}, constructs:
@@ -68,8 +59,4 @@ For each effect, returns:
 \item \strong{Unit-normalized} ATE in \link{-1,1} (\code{*_unit})
 \item \strong{Standardized} ATE dividing \code{_unit} by the control SD on the same scale (\code{*_std})
 }
-}
-\examples{
-set.seed(1)
-n <- 300
 }
