@@ -10,7 +10,7 @@ diff_in_means(
   treat,
   se_type = "HC2",
   clusters = NULL,
-  na_action = c("drop", "none"),
+  na_action = c("none", "drop"),
   top_k_max = NULL,
   ...
 )
@@ -26,25 +26,27 @@ diff_in_means(
 
 \item{clusters}{Optional string for clustering variable name in \code{data}.}
 
-\item{na_action}{"drop" (default) or "none". If "drop", listwise on used cols.}
+\item{na_action}{"none" (default) or "drop". If "drop", only \code{treat}/\code{clusters} are filtered globally;
+outcomes still do per-outcome NA filtering.}
 
 \item{top_k_max}{Optional integer (default J-1).}
 
 \item{...}{Extra args passed to estimatr::lm_robust.}
 }
 \value{
-Tibble with one row per (item × effect). Columns:
-estimate_\emph{, std.error_}, conf.low_\emph{, conf.high_} for scales raw/unit/std,
-sd_control_raw, sd_control_unit, p.value, outcome, effect_type, item, J, n, n_treat, n_control.
+Tibble with rows for all effects across all items and scales.
+Columns: estimate_\emph{, std.error_}, conf.low_\emph{, conf.high_} (raw/unit/std),
+sd_control_raw, sd_control_unit, p.value, outcome, effect_type, item, J,
+n, n_treat, n_control.
 }
 \description{
 For each item in \code{items}, constructs four outcome families:
 \enumerate{
-\item Average rank of the target (1 = best):
+\item Average rank (1 = best):
 \itemize{
-\item raw outcome: R in {1,...,J} (lower is better)
-\item unit outcome: U = (J - R)/(J - 1) in \link{0,1} (higher is better)
-\item std outcome: raw effect divided by SD(R | control)
+\item raw: R in {1,...,J} (lower is better)
+\item unit: U = (J - R)/(J - 1) in \link{0,1} (higher is better)
+\item std: raw effect divided by SD(R | control)
 }
 \item Pairwise wins vs. others (binary): Y = 1{R_target < R_other}
 \item Top-k (binary): Y = 1{R_target <= k}
@@ -52,11 +54,6 @@ For each item in \code{items}, constructs four outcome families:
 }
 }
 \details{
-Estimation is unweighted difference-in-means via estimatr::lm_robust(y ~ D).
-For each effect we report:
-\itemize{
-\item Raw ATE (for average-rank only; binaries have NA in raw block by design)
-\item Unit ATE (for all; binaries' unit == raw)
-\item Standardized ATE: (raw effect) / sd0_raw, where sd0_raw = SD of raw outcome among controls
-}
+Estimation is unweighted DIM via estimatr::lm_robust(y ~ D), fit on
+per-outcome subsets (no global listwise drop).
 }
