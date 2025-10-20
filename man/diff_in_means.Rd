@@ -2,7 +2,7 @@
 % Please edit documentation in R/diff_in_means.R
 \name{diff_in_means}
 \alias{diff_in_means}
-\title{Estimate ranking effects (unweighted): raw, unit, and standardized (raw/sd0)}
+\title{Estimate ranking effects (UNWEIGHTED): precompute outcomes → fit per outcome → summarize}
 \usage{
 diff_in_means(
   data,
@@ -16,44 +16,39 @@ diff_in_means(
 )
 }
 \arguments{
-\item{data}{A data.frame/tibble with \code{items} and \code{treat}.}
+\item{data}{A data.frame / tibble with ranking columns and \code{treat}.}
 
-\item{items}{Character vector of ranking columns (1 = top/best). Length >= 2.}
+\item{items}{Character vector of ranking columns (1 = best). Length >= 2.}
 
-\item{treat}{String; binary treatment column (0/1, logical, or factor codable to 0/1).}
+\item{treat}{Column name of binary treatment (0/1, logical, or factor codable to 0/1).}
 
 \item{se_type}{SE type for estimatr::lm_robust (default "HC2").}
 
-\item{clusters}{Optional string for clustering variable name in \code{data}.}
+\item{clusters}{Optional column name of a clustering variable (forwarded to lm_robust).}
 
-\item{na_action}{"none" (default) or "drop". If "drop", only \code{treat}/\code{clusters} are filtered globally;
-outcomes still do per-outcome NA filtering.}
+\item{na_action}{"none" (default) or "drop". If "drop", only rows missing on \code{treat}/\code{clusters}
+are removed up front; every outcome still does its own NA filtering.}
 
 \item{top_k_max}{Optional integer (default J-1).}
 
-\item{...}{Extra args passed to estimatr::lm_robust.}
+\item{...}{Extra args forwarded to estimatr::lm_robust.}
 }
 \value{
-Tibble with rows for all effects across all items and scales.
-Columns: estimate_\emph{, std.error_}, conf.low_\emph{, conf.high_} (raw/unit/std),
-sd_control_raw, sd_control_unit, p.value, outcome, effect_type, item, J,
-n, n_treat, n_control.
+A list with:
+\itemize{
+\item results: tibble of estimates for each (item × effect × scale in {raw,unit,std})
+\item outcomes_long: tibble of all precomputed outcomes used for fitting
+}
 }
 \description{
-For each item in \code{items}, constructs four outcome families:
-\enumerate{
-\item Average rank (1 = best):
-\itemize{
-\item raw: R in {1,...,J} (lower is better)
-\item unit: U = (J - R)/(J - 1) in \link{0,1} (higher is better)
-\item std: raw effect divided by SD(R | control)
-}
-\item Pairwise wins vs. others (binary): Y = 1{R_target < R_other}
-\item Top-k (binary): Y = 1{R_target <= k}
-\item Marginal (binary): Y = 1{R_target == r}
-}
-}
-\details{
-Estimation is unweighted DIM via estimatr::lm_robust(y ~ D), fit on
-per-outcome subsets (no global listwise drop).
+Pipeline:
+(1) Build a long tibble of ultimate outcomes:
+- Average rank: raw (R in {1..J}) and unit (U=(J-R)/(J-1))
+- Pairwise: Y = 1{R_target < R_other}  (unit scale)
+- Top-k:    Y = 1{R_target <= k}      (unit scale)
+- Marginal: Y = 1{R_target == r}      (unit scale)
+(2) Fit lm_robust(y ~ D) per (item, effect_type, outcome, scale)
+(3) Summarize and append a standardized row (std), where:
+std = raw_effect / sd0_raw (SD of the \emph{raw} outcome among controls).
+For binary families, raw==unit, so std = unit_effect / sd0_binary.
 }
